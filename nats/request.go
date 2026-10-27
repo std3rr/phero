@@ -17,6 +17,7 @@ package nats
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 
 	natsclient "github.com/nats-io/nats.go"
@@ -39,6 +40,11 @@ type Request struct {
 	// A header is whatever the caller chose to send: it identifies nobody, and
 	// is no basis for authorization.
 	Header natsclient.Header
+
+	// Extensions contains application-defined top-level JSON fields.
+	// Extensions carry data, not identity or authorization.
+	// "prompt" and "attachments" are reserved protocol fields.
+	Extensions map[string]json.RawMessage
 }
 
 // Attachment is a file sent inline with a prompt (§5.2). Content holds the raw
@@ -76,7 +82,10 @@ func withRequest(ctx context.Context, r *Request) context.Context {
 // envelope encodes r as the JSON envelope's fields (§5.1), base64-encoding the
 // attachments (§5.2).
 func (r *Request) envelope() envelope {
-	env := envelope{Prompt: r.Prompt}
+	env := envelope{
+		Prompt:     r.Prompt,
+		Extensions: cloneExtensions(r.Extensions),
+	}
 
 	for _, a := range r.Attachments {
 		env.Attachments = append(env.Attachments, attachment{
@@ -91,7 +100,10 @@ func (r *Request) envelope() envelope {
 // requestFromEnvelope builds the Request a handler sees from a decoded
 // envelope and the request's headers, which it copies.
 func requestFromEnvelope(env *envelope, header natsclient.Header) (*Request, error) {
-	r := &Request{Prompt: env.Prompt}
+	r := &Request{
+		Prompt:     env.Prompt,
+		Extensions: cloneExtensions(env.Extensions),
+	}
 
 	for _, a := range env.Attachments {
 		content, err := base64.StdEncoding.DecodeString(a.Content)
@@ -110,4 +122,20 @@ func requestFromEnvelope(env *envelope, header natsclient.Header) (*Request, err
 	}
 
 	return r, nil
+}
+
+// cloneExtensions copies extension keys and raw JSON values.
+// Reserved protocol fields cannot be represented as extensions.
+func cloneExtensions(src map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]json.RawMessage, len(src))
+	for key, value := range src {
+		if key == "prompt" || key == "attachments" {
+			continue
+		}
+		dst[key] = append(json.RawMessage(nil), value...)
+	}
+	return dst
 }

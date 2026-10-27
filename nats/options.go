@@ -55,7 +55,9 @@ type serverConfig struct {
 	// tightening the second.
 	maxPayloadSet bool
 	// attachmentsOk controls the attachments_ok endpoint metadata flag (§2.1).
-	attachmentsOk bool
+	attachmentsOk    bool
+	endpointMetadata map[string]string
+	eventStreaming   bool
 	// heartbeatInterval is the cadence of heartbeat publication (§8.2).
 	heartbeatInterval time.Duration
 	// keepaliveInterval is the cadence of mid-stream ack chunks (§6.4).
@@ -115,6 +117,29 @@ func WithMaxPayload(s string) ServerOption {
 // attachments_ok=true (§2.1). Default false.
 func WithAttachmentsOk(ok bool) ServerOption {
 	return func(c *serverConfig) { c.attachmentsOk = ok }
+}
+
+// WithEndpointMetadata adds application-defined prompt endpoint metadata.
+//
+// Protocol-owned fields such as max_payload and attachments_ok cannot be
+// overwritten. The input map is copied to avoid retaining caller ownership.
+func WithEndpointMetadata(metadata map[string]string) ServerOption {
+	copyMetadata := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		if key == "max_payload" || key == "attachments_ok" {
+			continue
+		}
+		copyMetadata[key] = value
+	}
+
+	return func(c *serverConfig) {
+		if c.endpointMetadata == nil {
+			c.endpointMetadata = make(map[string]string)
+		}
+		for key, value := range copyMetadata {
+			c.endpointMetadata[key] = value
+		}
+	}
 }
 
 // WithHeartbeatInterval sets the heartbeat publication cadence (§8.2).
@@ -242,4 +267,10 @@ func FilterByName(name string) DiscoverOption {
 // knowing how a session is joined to a name.
 func FilterBySession(session string) DiscoverOption {
 	return func(f *discoverFilter) { f.session = session }
+}
+
+// WithEventStreaming permits an explicitly requested event response mode.
+// It does not authorize disclosure of reasoning or tool contents.
+func WithEventStreaming(enabled bool) ServerOption {
+	return func(c *serverConfig) { c.eventStreaming = enabled }
 }

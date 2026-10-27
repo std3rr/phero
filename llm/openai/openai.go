@@ -363,6 +363,18 @@ func (c *Client) openaiTools(tools []*llm.Tool) []openai.Tool {
 	return openaiTools
 }
 
+// WithHTTPClient sets the HTTP client used for OpenAI API requests.
+//
+// This allows callers to configure custom transports for tracing, proxies,
+// authentication, testing, or other HTTP concerns.
+func WithHTTPClient(client openai.HTTPDoer) Option {
+	return func(c *Client) {
+		if client != nil {
+			c.config.HTTPClient = client
+		}
+	}
+}
+
 // WithBaseURL sets the base URL used by the underlying OpenAI client.
 //
 // This enables use with OpenAI-compatible endpoints.

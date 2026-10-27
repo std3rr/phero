@@ -38,8 +38,54 @@ const (
 
 // envelope is the JSON request payload (§5.1).
 type envelope struct {
-	Prompt      string       `json:"prompt"`
-	Attachments []attachment `json:"attachments,omitempty"`
+	Prompt      string                     `json:"prompt"`
+	Attachments []attachment               `json:"attachments,omitempty"`
+	Extensions  map[string]json.RawMessage `json:"-"`
+}
+
+// MarshalJSON writes extensions as top-level fields without allowing them
+// to override protocol-owned envelope fields.
+func (e envelope) MarshalJSON() ([]byte, error) {
+	fields := cloneExtensions(e.Extensions)
+	if fields == nil {
+		fields = make(map[string]json.RawMessage)
+	}
+
+	prompt, err := json.Marshal(e.Prompt)
+	if err != nil {
+		return nil, err
+	}
+	fields["prompt"] = prompt
+
+	if len(e.Attachments) > 0 {
+		attachments, err := json.Marshal(e.Attachments)
+		if err != nil {
+			return nil, err
+		}
+		fields["attachments"] = attachments
+	}
+
+	return json.Marshal(fields)
+}
+
+// UnmarshalJSON preserves unknown top-level fields as opaque JSON.
+func (e *envelope) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+
+	if err := json.Unmarshal(fields["prompt"], &e.Prompt); err != nil {
+		return err
+	}
+	if value, ok := fields["attachments"]; ok {
+		if err := json.Unmarshal(value, &e.Attachments); err != nil {
+			return err
+		}
+	}
+
+	e.Extensions = cloneExtensions(fields)
+	return nil
 }
 
 // attachment is an inline file attachment (§5.2).

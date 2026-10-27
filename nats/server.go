@@ -16,8 +16,10 @@ package nats
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"log/slog"
 	"strings"
 	"sync"
@@ -62,6 +64,12 @@ const natsDefaultMaxPayload = 1 << 20
 // and workflow executors both satisfy it.
 type Handler interface {
 	Run(ctx context.Context, parts ...llm.ContentPart) (*agent.Result, error)
+}
+
+// StreamingHandler is an optional Handler extension for progressive events.
+type StreamingHandler interface {
+	Handler
+	RunStream(ctx context.Context, parts ...llm.ContentPart) iter.Seq2[agent.Event, error]
 }
 
 // Server registers a Handler as a NATS micro service implementing the
@@ -335,10 +343,17 @@ func (s *Server) promptMetadata() map[string]string {
 		attachmentsOk = attachmentsOkTrue
 	}
 
-	return map[string]string{
+	metadata := map[string]string{
 		"max_payload":    s.cfg.maxPayload,
 		"attachments_ok": attachmentsOk,
 	}
+	for key, value := range s.cfg.endpointMetadata {
+		if key == "max_payload" || key == "attachments_ok" {
+			continue
+		}
+		metadata[key] = value
+	}
+	return metadata
 }
 
 // register adds the micro service and its endpoints and starts the heartbeat
@@ -487,6 +502,18 @@ func (s *Server) processPrompt(ctx context.Context, req natsio.Request) {
 		}
 	})
 
+	if s.cfg.eventStreaming &&
+		natsclient.Header(req.Headers()).Get("Phero-Response-Mode") == "events" {
+		if streaming, ok := s.handler.(StreamingHandler); ok {
+			stopKeepalive := func() {
+				kaCancel()
+				kaWg.Wait()
+			}
+			s.sendEventStream(ctx, req, streaming, parts, stopKeepalive)
+			return
+		}
+	}
+
 	result, runErr := s.handler.Run(ctx, parts...)
 
 	// Stop keepalive before emitting the response/terminator so ack chunks
@@ -615,4 +642,84 @@ func (s *Server) handleStatus(_ context.Context, req natsio.Request) {
 	}
 
 	_ = req.Respond(encodeHeartbeat(s.heartbeat(instanceID)))
+}
+
+// sendEventStream emits only assistant text deltas. Reasoning and tool payloads
+// are intentionally excluded. The terminal response remains canonical NAP.
+func (s *Server) sendEventStream(
+	ctx context.Context,
+	req natsio.Request,
+	handler StreamingHandler,
+	parts []llm.ContentPart,
+	stopKeepalive func(),
+) {
+	stopped := false
+	stop := func() {
+		if !stopped {
+			stopKeepalive()
+			stopped = true
+		}
+	}
+	defer stop()
+
+	for event, runErr := range handler.RunStream(ctx, parts...) {
+		if runErr != nil {
+			stop()
+			sendCodedError(req, s.errorFor(ctx, runErr))
+			return
+		}
+
+		switch event.Type {
+		case agent.EventTextDelta:
+			if event.TextDelta == "" {
+				continue
+			}
+			data, err := json.Marshal(struct {
+				Schema string `json:"schema"`
+				Event  string `json:"event"`
+				Delta  string `json:"delta"`
+			}{
+				Schema: "agent-event.v1",
+				Event:  "text_delta",
+				Delta:  event.TextDelta,
+			})
+			if err != nil {
+				stop()
+				sendError(req, "500", errCodeInternal, "encode event")
+				return
+			}
+			chunk, err := json.Marshal(struct {
+				Type string          `json:"type"`
+				Data json.RawMessage `json:"data"`
+			}{Type: "agent_event", Data: data})
+			if err != nil {
+				stop()
+				sendError(req, "500", errCodeInternal, "encode event")
+				return
+			}
+			if len(chunk) > s.maxPublishBytes() {
+				stop()
+				sendError(req, "500", errCodeResponseTooLarge, "event exceeds max_payload")
+				return
+			}
+			if err := req.Respond(chunk); err != nil {
+				stop()
+				sendError(req, "500", errCodeResponseFailed, "send event failed")
+				return
+			}
+		case agent.EventDone:
+			if event.Result == nil {
+				stop()
+				sendError(req, "500", errCodeInternal, "stream completed without a result")
+				return
+			}
+			s.warnDroppedHandoffs(ctx, event.Result)
+			stop()
+			s.sendResponse(req, event.Result.ReplyText())
+			return
+		}
+	}
+
+	stop()
+	sendError(req, "500", errCodeInternal, "stream ended without completion")
 }
