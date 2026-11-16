@@ -644,8 +644,9 @@ func (s *Server) handleStatus(_ context.Context, req natsio.Request) {
 	_ = req.Respond(encodeHeartbeat(s.heartbeat(instanceID)))
 }
 
-// sendEventStream emits only assistant text deltas. Reasoning and tool payloads
-// are intentionally excluded. The terminal response remains canonical NAP.
+// sendEventStream emits assistant text and reasoning deltas when event
+// streaming is opted into. Tool payloads remain excluded. The terminal
+// response remains canonical NAP.
 func (s *Server) sendEventStream(
 	ctx context.Context,
 	req natsio.Request,
@@ -670,18 +671,26 @@ func (s *Server) sendEventStream(
 		}
 
 		switch event.Type {
-		case agent.EventTextDelta:
-			if event.TextDelta == "" {
+		case agent.EventTextDelta, agent.EventReasoningDelta:
+			delta := event.TextDelta
+			eventKind := "text_delta"
+			if event.Type == agent.EventReasoningDelta {
+				delta = event.ReasoningDelta
+				eventKind = "reasoning_delta"
+			}
+			if delta == "" {
 				continue
 			}
 			data, err := json.Marshal(struct {
-				Schema string `json:"schema"`
-				Event  string `json:"event"`
-				Delta  string `json:"delta"`
+				Schema    string `json:"schema"`
+				Event     string `json:"event"`
+				Delta     string `json:"delta"`
+				Iteration int    `json:"iteration,omitempty"`
 			}{
-				Schema: "agent-event.v1",
-				Event:  "text_delta",
-				Delta:  event.TextDelta,
+				Schema:    "agent-event.v1",
+				Event:     eventKind,
+				Delta:     delta,
+				Iteration: event.Iteration,
 			})
 			if err != nil {
 				stop()

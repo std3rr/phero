@@ -37,12 +37,14 @@ func (h *testStreamingHandler) RunStream(
 		if !yield(agent.Event{
 			Type:      agent.EventTextDelta,
 			TextDelta: "hello ",
+			Iteration: 1,
 		}, nil) {
 			return
 		}
 		if !yield(agent.Event{
 			Type:           agent.EventReasoningDelta,
 			ReasoningDelta: "private reasoning",
+			Iteration:      1,
 		}, nil) {
 			return
 		}
@@ -56,6 +58,7 @@ func (h *testStreamingHandler) RunStream(
 		if !yield(agent.Event{
 			Type:      agent.EventTextDelta,
 			TextDelta: "world",
+			Iteration: 2,
 		}, nil) {
 			return
 		}
@@ -73,7 +76,7 @@ func TestEventStreamingOptIn(t *testing.T) {
 	h := &testStreamingHandler{}
 	s.handler = h
 
-	// New server option, intentionally not implemented yet.
+	// Both server and request explicitly opt into event streaming.
 	WithEventStreaming(true)(s.cfg)
 
 	req := &fakeRequest{
@@ -90,6 +93,9 @@ func TestEventStreamingOptIn(t *testing.T) {
 	}
 
 	var gotTypes []string
+	var gotEvents []string
+	var gotIterations []int
+	var gotReasoning string
 	var finalText string
 
 	for _, raw := range req.responses {
@@ -108,14 +114,17 @@ func TestEventStreamingOptIn(t *testing.T) {
 		switch chunk.Type {
 		case "agent_event":
 			var event struct {
-				Event string `json:"event"`
-				Delta string `json:"delta"`
+				Event     string `json:"event"`
+				Delta     string `json:"delta"`
+				Iteration int    `json:"iteration"`
 			}
 			if err := json.Unmarshal(chunk.Data, &event); err != nil {
 				t.Fatal(err)
 			}
-			if event.Event != "text_delta" {
-				t.Fatalf("unexpected exposed agent event: %q", event.Event)
+			gotEvents = append(gotEvents, event.Event)
+			gotIterations = append(gotIterations, event.Iteration)
+			if event.Event == "reasoning_delta" {
+				gotReasoning += event.Delta
 			}
 		case "response":
 			if err := json.Unmarshal(chunk.Data, &finalText); err != nil {
@@ -129,17 +138,32 @@ func TestEventStreamingOptIn(t *testing.T) {
 	}
 
 	for _, response := range req.responses {
-		if bytes.Contains(response, []byte("private reasoning")) ||
-			bytes.Contains(response, []byte("private tool output")) {
-			t.Fatal("sensitive event content leaked onto NATS")
+		if bytes.Contains(response, []byte("private tool output")) {
+			t.Fatal("tool content leaked onto NATS")
 		}
 	}
-	if len(gotTypes) != 4 ||
+	if len(gotTypes) != 5 ||
 		gotTypes[0] != "status" ||
 		gotTypes[1] != "agent_event" ||
 		gotTypes[2] != "agent_event" ||
-		gotTypes[3] != "response" {
+		gotTypes[3] != "agent_event" ||
+		gotTypes[4] != "response" {
 		t.Fatalf("chunk types = %v", gotTypes)
+	}
+	if len(gotEvents) != 3 ||
+		gotEvents[0] != "text_delta" ||
+		gotEvents[1] != "reasoning_delta" ||
+		gotEvents[2] != "text_delta" {
+		t.Fatalf("event order = %v", gotEvents)
+	}
+	if len(gotIterations) != 3 ||
+		gotIterations[0] != 1 ||
+		gotIterations[1] != 1 ||
+		gotIterations[2] != 2 {
+		t.Fatalf("event iterations = %v", gotIterations)
+	}
+	if gotReasoning != "private reasoning" {
+		t.Fatalf("reasoning delta not preserved: %q", gotReasoning)
 	}
 	if len(req.responses[len(req.responses)-1]) != 0 {
 		t.Fatal("missing zero-byte terminator")

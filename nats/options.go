@@ -270,7 +270,8 @@ func FilterBySession(session string) DiscoverOption {
 }
 
 // WithEventStreaming permits an explicitly requested event response mode.
-// It does not authorize disclosure of reasoning or tool contents.
+// When opted into by both peers, text and reasoning deltas are streamed.
+// Tool contents remain excluded.
 func WithEventStreaming(enabled bool) ServerOption {
 	return func(c *serverConfig) { c.eventStreaming = enabled }
 }
